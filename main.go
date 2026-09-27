@@ -10,6 +10,8 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
@@ -27,18 +29,24 @@ const (
 type Controller struct {
 	queue      workqueue.TypedRateLimitingInterface[string]
 	nodeLister listersv1.NodeLister
+	podLister  listersv1.PodLister
 	hasSynced  []cache.InformerSynced
 }
 
 func NewController(factory informers.SharedInformerFactory) *Controller {
 	nodeInformer := factory.Core().V1().Nodes()
+	podInformer := factory.Core().V1().Pods()
 
 	c := &Controller{
 		queue: workqueue.NewTypedRateLimitingQueue[string](
 			workqueue.DefaultTypedControllerRateLimiter[string](),
 		),
 		nodeLister: nodeInformer.Lister(),
-		hasSynced:  []cache.InformerSynced{nodeInformer.Informer().HasSynced},
+		podLister:  podInformer.Lister(),
+		hasSynced: []cache.InformerSynced{
+			nodeInformer.Informer().HasSynced,
+			podInformer.Informer().HasSynced,
+		},
 	}
 
 	nodeInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -137,8 +145,41 @@ func (c *Controller) reconcile(key string) error {
 		return nil
 	}
 
-	fmt.Printf("node %s tainted: %s=%s:%s\n",
+	fmt.Printf("\nnode %s tainted: %s=%s:%s\n",
 		name, taint.Key, taint.Value, taint.Effect)
+
+	pods, err := c.podLister.List(labels.Everything())
+	if err != nil {
+		return err
+	}
+
+	var atRisk int
+	for _, pod := range pods {
+		if pod.Spec.NodeName != name {
+			continue
+		}
+		if pod.DeletionTimestamp != nil {
+			continue
+		}
+
+		owner := metav1.GetControllerOf(pod)
+		switch {
+		case owner == nil:
+			fmt.Printf("  %s/%s — bare pod, will NOT be recreated\n",
+				pod.Namespace, pod.Name)
+			atRisk++
+		case owner.Kind == "DaemonSet":
+			fmt.Printf("  %s/%s — daemonset, expected\n",
+				pod.Namespace, pod.Name)
+		default:
+			fmt.Printf("  %s/%s — owned by %s %s\n",
+				pod.Namespace, pod.Name, owner.Kind, owner.Name)
+		}
+	}
+
+	if atRisk > 0 {
+		fmt.Printf("  %d pod(s) at risk on %s\n", atRisk, name)
+	}
 	return nil
 }
 
