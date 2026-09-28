@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"flag"
 	"fmt"
 	"os"
 	"os/signal"
@@ -12,6 +14,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
@@ -22,22 +25,31 @@ import (
 )
 
 const (
-	maxRetries = 5
-	taintKey   = "spot-interruption"
+	maxRetries     = 5
+	taintKey       = "spot-interruption"
+	riskAnnotation = "node-drain-controller/at-risk"
 )
 
 type Controller struct {
+	clientset  kubernetes.Interface
 	queue      workqueue.TypedRateLimitingInterface[string]
 	nodeLister listersv1.NodeLister
 	podLister  listersv1.PodLister
 	hasSynced  []cache.InformerSynced
+	dryRun     bool
 }
 
-func NewController(factory informers.SharedInformerFactory) *Controller {
+func NewController(
+	clientset kubernetes.Interface,
+	factory informers.SharedInformerFactory,
+	dryRun bool,
+) *Controller {
 	nodeInformer := factory.Core().V1().Nodes()
 	podInformer := factory.Core().V1().Pods()
 
 	c := &Controller{
+		clientset: clientset,
+		dryRun:    dryRun,
 		queue: workqueue.NewTypedRateLimitingQueue[string](
 			workqueue.DefaultTypedControllerRateLimiter[string](),
 		),
@@ -171,6 +183,9 @@ func (c *Controller) reconcile(key string) error {
 			fmt.Printf("  %s/%s — bare pod, will NOT be recreated\n",
 				pod.Namespace, pod.Name)
 			atRisk++
+			if err := c.annotatePod(pod, name); err != nil {
+				return err
+			}
 		case owner.Kind == "DaemonSet":
 			fmt.Printf("  %s/%s — daemonset, expected\n",
 				pod.Namespace, pod.Name)
@@ -186,7 +201,38 @@ func (c *Controller) reconcile(key string) error {
 	return nil
 }
 
+func (c *Controller) annotatePod(pod *corev1.Pod, nodeName string) error {
+	if pod.Annotations[riskAnnotation] == nodeName {
+		return nil
+	}
+
+	if c.dryRun {
+		fmt.Printf("    [dry-run] would annotate %s/%s\n", pod.Namespace, pod.Name)
+		return nil
+	}
+
+	patch := []byte(fmt.Sprintf(
+		`{"metadata":{"annotations":{%q:%q}}}`, riskAnnotation, nodeName))
+
+	_, err := c.clientset.CoreV1().Pods(pod.Namespace).Patch(
+		context.Background(),
+		pod.Name,
+		types.MergePatchType,
+		patch,
+		metav1.PatchOptions{},
+	)
+	if err != nil {
+		return fmt.Errorf("annotating %s/%s: %w", pod.Namespace, pod.Name, err)
+	}
+
+	fmt.Printf("    annotated %s/%s\n", pod.Namespace, pod.Name)
+	return nil
+}
+
 func main() {
+	dryRun := flag.Bool("dry-run", false, "log actions without changing anything")
+	flag.Parse()
+
 	kubeconfig := filepath.Join(homeDir(), ".kube", "config")
 	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
 	if err != nil {
@@ -199,7 +245,11 @@ func main() {
 	}
 
 	factory := informers.NewSharedInformerFactory(clientset, 30*time.Second)
-	controller := NewController(factory)
+	controller := NewController(clientset, factory, *dryRun)
+
+	if *dryRun {
+		fmt.Println("running in dry-run mode — no changes will be made")
+	}
 
 	stopCh := make(chan struct{})
 	go func() {
