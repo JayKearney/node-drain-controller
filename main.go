@@ -161,6 +161,9 @@ func (c *Controller) reconcile(key string) error {
 		if pod.DeletionTimestamp != nil {
 			continue
 		}
+		if _, isMirror := pod.Annotations["kubernetes.io/config.mirror"]; isMirror {
+			continue
+		}
 
 		owner := metav1.GetControllerOf(pod)
 		switch {
