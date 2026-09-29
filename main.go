@@ -154,7 +154,7 @@ func (c *Controller) reconcile(key string) error {
 	}
 
 	if taint == nil {
-		return nil
+		return c.clearAnnotations(name)
 	}
 
 	fmt.Printf("\nnode %s tainted: %s=%s:%s\n",
@@ -226,6 +226,53 @@ func (c *Controller) annotatePod(pod *corev1.Pod, nodeName string) error {
 	}
 
 	fmt.Printf("    annotated %s/%s\n", pod.Namespace, pod.Name)
+	return nil
+}
+
+func (c *Controller) clearAnnotations(nodeName string) error {
+	pods, err := c.podLister.List(labels.Everything())
+	if err != nil {
+		return err
+	}
+
+	for _, pod := range pods {
+		if pod.Spec.NodeName != nodeName {
+			continue
+		}
+		if pod.Annotations[riskAnnotation] == "" {
+			continue
+		}
+		if err := c.removeAnnotation(pod); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Controller) removeAnnotation(pod *corev1.Pod) error {
+	if c.dryRun {
+		fmt.Printf("[dry-run] would clear annotation on %s/%s\n",
+			pod.Namespace, pod.Name)
+		return nil
+	}
+
+	patch := []byte(fmt.Sprintf(
+		`{"metadata":{"annotations":{%q:null}}}`, riskAnnotation))
+
+	_, err := c.clientset.CoreV1().Pods(pod.Namespace).Patch(
+		context.Background(),
+		pod.Name,
+		types.MergePatchType,
+		patch,
+		metav1.PatchOptions{},
+	)
+	if err != nil {
+		return fmt.Errorf("clearing annotation on %s/%s: %w",
+			pod.Namespace, pod.Name, err)
+	}
+
+	fmt.Printf("cleared annotation on %s/%s — node no longer tainted\n",
+		pod.Namespace, pod.Name)
 	return nil
 }
 
