@@ -18,9 +18,12 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
+	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	listersv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 )
 
@@ -36,6 +39,7 @@ type Controller struct {
 	nodeLister listersv1.NodeLister
 	podLister  listersv1.PodLister
 	hasSynced  []cache.InformerSynced
+	recorder   record.EventRecorder
 	dryRun     bool
 }
 
@@ -47,9 +51,19 @@ func NewController(
 	nodeInformer := factory.Core().V1().Nodes()
 	podInformer := factory.Core().V1().Pods()
 
+	broadcaster := record.NewBroadcaster()
+	broadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{
+		Interface: clientset.CoreV1().Events(""),
+	})
+	recorder := broadcaster.NewRecorder(
+		scheme.Scheme,
+		corev1.EventSource{Component: "node-drain-controller"},
+	)
+
 	c := &Controller{
 		clientset: clientset,
 		dryRun:    dryRun,
+		recorder:  recorder,
 		queue: workqueue.NewTypedRateLimitingQueue[string](
 			workqueue.DefaultTypedControllerRateLimiter[string](),
 		),
@@ -183,6 +197,9 @@ func (c *Controller) reconcile(key string) error {
 			fmt.Printf("  %s/%s — bare pod, will NOT be recreated\n",
 				pod.Namespace, pod.Name)
 			atRisk++
+			c.recorder.Eventf(pod, corev1.EventTypeWarning, "DisruptionRisk",
+				"Node %s is marked for disruption and this pod has no controller owner, so it will not be recreated",
+				name)
 			if err := c.annotatePod(pod, name); err != nil {
 				return err
 			}
