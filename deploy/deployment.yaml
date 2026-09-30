@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: node-drain-controller
+  namespace: kube-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: node-drain-controller
+  template:
+    metadata:
+      labels:
+        app: node-drain-controller
+    spec:
+      serviceAccountName: node-drain-controller
+      containers:
+      - name: controller
+        image: node-drain-controller:dev
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            memory: 256Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+      terminationGracePeriodSeconds: 30

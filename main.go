@@ -21,6 +21,7 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	listersv1 "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/record"
@@ -297,10 +298,16 @@ func main() {
 	dryRun := flag.Bool("dry-run", false, "log actions without changing anything")
 	flag.Parse()
 
-	kubeconfig := filepath.Join(homeDir(), ".kube", "config")
-	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+	config, err := rest.InClusterConfig()
 	if err != nil {
-		panic(err.Error())
+		kubeconfig := filepath.Join(homeDir(), ".kube", "config")
+		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
+		if err != nil {
+			panic(err.Error())
+		}
+		fmt.Println("using kubeconfig")
+	} else {
+		fmt.Println("using in-cluster config")
 	}
 
 	clientset, err := kubernetes.NewForConfig(config)
