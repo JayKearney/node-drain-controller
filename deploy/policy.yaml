@@ -1,0 +1,7 @@
+apiVersion: jk.io/v1alpha1
+kind: DisruptionPolicy
+metadata:
+  name: default
+spec:
+  taintKey: spot-interruption
+  annotate: true

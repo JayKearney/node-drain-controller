@@ -1,0 +1,38 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: disruptionpolicies.jk.io
+spec:
+  group: jk.io
+  names:
+    kind: DisruptionPolicy
+    plural: disruptionpolicies
+    singular: disruptionpolicy
+    shortNames: ["dp"]
+  scope: Cluster
+  versions:
+  - name: v1alpha1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            required: ["taintKey"]
+            properties:
+              taintKey:
+                type: string
+                description: The taint key that marks a node for disruption
+              annotate:
+                type: boolean
+                default: true
+                description: Whether to annotate at-risk pods
+    additionalPrinterColumns:
+    - name: Taint Key
+      type: string
+      jsonPath: .spec.taintKey
+    - name: Annotate
+      type: boolean
+      jsonPath: .spec.annotate

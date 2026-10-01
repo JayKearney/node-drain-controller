@@ -13,9 +13,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -42,12 +45,16 @@ type Controller struct {
 	hasSynced  []cache.InformerSynced
 	recorder   record.EventRecorder
 	dryRun     bool
+	taintKey   string
+	annotate   bool
 }
 
 func NewController(
 	clientset kubernetes.Interface,
 	factory informers.SharedInformerFactory,
 	dryRun bool,
+	policyTaintKey string,
+	annotate bool,
 ) *Controller {
 	nodeInformer := factory.Core().V1().Nodes()
 	podInformer := factory.Core().V1().Pods()
@@ -65,6 +72,8 @@ func NewController(
 		clientset: clientset,
 		dryRun:    dryRun,
 		recorder:  recorder,
+		taintKey:  policyTaintKey,
+		annotate:  annotate,
 		queue: workqueue.NewTypedRateLimitingQueue[string](
 			workqueue.DefaultTypedControllerRateLimiter[string](),
 		),
@@ -162,7 +171,7 @@ func (c *Controller) reconcile(key string) error {
 
 	var taint *corev1.Taint
 	for i := range node.Spec.Taints {
-		if node.Spec.Taints[i].Key == taintKey {
+		if node.Spec.Taints[i].Key == c.taintKey {
 			taint = &node.Spec.Taints[i]
 			break
 		}
@@ -201,8 +210,10 @@ func (c *Controller) reconcile(key string) error {
 			c.recorder.Eventf(pod, corev1.EventTypeWarning, "DisruptionRisk",
 				"Node %s is marked for disruption and this pod has no controller owner, so it will not be recreated",
 				name)
-			if err := c.annotatePod(pod, name); err != nil {
-				return err
+			if c.annotate {
+				if err := c.annotatePod(pod, name); err != nil {
+					return err
+				}
 			}
 		case owner.Kind == "DaemonSet":
 			fmt.Printf("  %s/%s — daemonset, expected\n",
@@ -294,6 +305,45 @@ func (c *Controller) removeAnnotation(pod *corev1.Pod) error {
 	return nil
 }
 
+var policyGVR = schema.GroupVersionResource{
+	Group:    "jk.io",
+	Version:  "v1alpha1",
+	Resource: "disruptionpolicies",
+}
+
+func loadPolicy(config *rest.Config) (string, bool) {
+	dyn, err := dynamic.NewForConfig(config)
+	if err != nil {
+		fmt.Printf("could not build dynamic client: %v — using defaults\n", err)
+		return taintKey, true
+	}
+
+	obj, err := dyn.Resource(policyGVR).Get(
+		context.Background(), "default", metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			fmt.Println("no DisruptionPolicy found — using defaults")
+		} else {
+			fmt.Printf("could not read DisruptionPolicy: %v — using defaults\n", err)
+		}
+		return taintKey, true
+	}
+
+	key, found, err := unstructured.NestedString(obj.Object, "spec", "taintKey")
+	if err != nil || !found {
+		fmt.Println("DisruptionPolicy has no spec.taintKey — using default")
+		key = taintKey
+	}
+
+	annotate, found, err := unstructured.NestedBool(obj.Object, "spec", "annotate")
+	if err != nil || !found {
+		annotate = true
+	}
+
+	fmt.Printf("loaded policy: taintKey=%s annotate=%t\n", key, annotate)
+	return key, annotate
+}
+
 func main() {
 	dryRun := flag.Bool("dry-run", false, "log actions without changing anything")
 	flag.Parse()
@@ -315,8 +365,10 @@ func main() {
 		panic(err.Error())
 	}
 
+	policyTaintKey, annotate := loadPolicy(config)
+
 	factory := informers.NewSharedInformerFactory(clientset, 30*time.Second)
-	controller := NewController(clientset, factory, *dryRun)
+	controller := NewController(clientset, factory, *dryRun, policyTaintKey, annotate)
 
 	if *dryRun {
 		fmt.Println("running in dry-run mode — no changes will be made")
